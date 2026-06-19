@@ -12,5 +12,6 @@ deployment/
 installer_output/
 pysidedeploy.spec
 deliverables/*.zip
+deliverables/*.exe
 deliverables/*-preview.png
 deliverables/*.inspect.ndjson
