@@ -9,14 +9,27 @@ if ($version -ne "3.11") {
     throw "打包环境必须为 Python 3.11，当前为 Python $version。"
 }
 
-python -c "import PySide6, pandas, openpyxl; print('依赖检查通过')"
-pyside6-deploy main.py --name "ProjectArchiveManager" --force --keep-deployment-files
+python -c "import PySide6, pandas, openpyxl; print('Dependency check passed')"
 
-$exe = Get-ChildItem -Path ".\deployment" -Filter "ProjectArchiveManager.exe" -Recurse |
+if (Test-Path ".\pysidedeploy.spec") {
+    Remove-Item ".\pysidedeploy.spec" -Force
+}
+pyside6-deploy main.py --init
+
+$spec = Get-Content ".\pysidedeploy.spec" -Raw
+$spec = $spec -replace "title = .*", "title = ProjectArchiveManager"
+$spec = $spec -replace "extra_args = .*", "extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads"
+Set-Content ".\pysidedeploy.spec" $spec -Encoding UTF8
+
+pyside6-deploy -c ".\pysidedeploy.spec" --force --keep-deployment-files
+
+$exe = Get-ChildItem -Path "." -Filter "main.exe" -Recurse |
     Select-Object -First 1
 if ($null -eq $exe) {
-    throw "未在 deployment 目录找到 ProjectArchiveManager.exe。"
+    throw "未找到 pyside6-deploy 生成的 main.exe。"
 }
+New-Item -ItemType Directory -Path ".\deployment" -Force | Out-Null
+Copy-Item $exe.FullName ".\deployment\ProjectArchiveManager.exe" -Force
 
 $isccCandidates = @(
     "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
