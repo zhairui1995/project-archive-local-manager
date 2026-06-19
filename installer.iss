@@ -20,9 +20,6 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 
-[Languages]
-Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
-
 [Files]
 Source: "deployment\ProjectArchiveManager.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "MIGRATION_AND_USER_GUIDE.md"; DestDir: "{app}"; Flags: ignoreversion
