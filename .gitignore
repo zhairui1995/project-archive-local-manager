@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+*.log
+tools/node_modules
+deployment/
+installer_output/
+pysidedeploy.spec
+deliverables/*.zip
+deliverables/*-preview.png
+deliverables/*.inspect.ndjson
