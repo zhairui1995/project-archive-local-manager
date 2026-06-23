@@ -9,7 +9,7 @@ if ($version -ne "3.11") {
     throw "打包环境必须为 Python 3.11，当前为 Python $version。"
 }
 
-python -c "import PySide6, pandas, openpyxl; print('Dependency check passed')"
+python -c "import PySide6, openpyxl; print('Dependency check passed')"
 
 if (Test-Path ".\pysidedeploy.spec") {
     Remove-Item ".\pysidedeploy.spec" -Force
@@ -18,7 +18,7 @@ pyside6-deploy main.py --init
 
 $spec = Get-Content ".\pysidedeploy.spec" -Raw
 $spec = $spec -replace "title = .*", "title = ProjectArchiveManager"
-$spec = $spec -replace "extra_args = .*", "extra_args = --quiet --noinclude-qt-translations --assume-yes-for-downloads"
+$spec = $spec -replace "extra_args = .*", "extra_args = --quiet --windows-console-mode=disable --noinclude-qt-translations --assume-yes-for-downloads"
 Set-Content ".\pysidedeploy.spec" $spec -Encoding UTF8
 
 pyside6-deploy -c ".\pysidedeploy.spec" --force --keep-deployment-files

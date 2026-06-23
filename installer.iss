@@ -1,5 +1,5 @@
 #define MyAppName "项目档案本地管理系统"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.2.0"
 #define MyAppPublisher "Local"
 #define MyAppExeName "ProjectArchiveManager.exe"
 

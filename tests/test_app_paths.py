@@ -11,3 +11,6 @@ def test_windows_database_uses_local_app_data(monkeypatch, tmp_path: Path) -> No
     assert app_paths.database_path() == (
         tmp_path / "ProjectArchiveManager" / "data" / "project_archives.db"
     )
+    assert app_paths.lock_config_path() == (
+        tmp_path / "ProjectArchiveManager" / "data" / "app_lock.json"
+    )

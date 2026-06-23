@@ -1,20 +1,16 @@
-"""SQLite 数据库基础设施与动态档案状态查询。
-
-设计约束：
-1. Files 表绝不保存 status 字段。
-2. “在库/已借出”仅由 return_date IS NULL 的借阅记录动态计算。
-3. 每个数据库连接都启用外键、busy timeout，并由上下文管理器负责事务。
-"""
+"""SQLite 数据库基础设施、版本迁移与档案库存查询。"""
 
 from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 
 DEFAULT_BUSY_TIMEOUT_MS = 30_000
+SCHEMA_VERSION = 2
 
 
 SCHEMA_SQL = """
@@ -29,7 +25,13 @@ CREATE TABLE IF NOT EXISTS Projects (
     contact_person TEXT,
     contact_phone TEXT,
     remarks TEXT,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    parent_project_id INTEGER,
+    short_name TEXT,
+    design_company TEXT,
+    design_amount TEXT,
+    completion_date TEXT,
+    FOREIGN KEY (parent_project_id) REFERENCES Projects(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS Files (
@@ -40,6 +42,9 @@ CREATE TABLE IF NOT EXISTS Files (
     type TEXT,
     count_text TEXT,
     file_path TEXT,
+    original_count INTEGER NOT NULL DEFAULT 1 CHECK (original_count >= 0),
+    copy_count INTEGER NOT NULL DEFAULT 0 CHECK (copy_count >= 0),
+    deleted_at DATETIME,
     FOREIGN KEY (project_id) REFERENCES Projects(id) ON DELETE CASCADE
 );
 
@@ -51,19 +56,25 @@ CREATE TABLE IF NOT EXISTS BorrowRecords (
     reason TEXT,
     borrow_date DATE NOT NULL,
     return_date DATE,
+    media_type TEXT NOT NULL DEFAULT '原件'
+        CHECK (media_type IN ('原件', '复印件')),
+    quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+    expected_return_date DATE,
     FOREIGN KEY (file_id) REFERENCES Files(id) ON DELETE CASCADE,
-    CHECK (return_date IS NULL OR return_date >= borrow_date)
+    CHECK (return_date IS NULL OR return_date >= borrow_date),
+    CHECK (
+        expected_return_date IS NULL
+        OR expected_return_date >= borrow_date
+    )
 );
 
+CREATE INDEX IF NOT EXISTS idx_projects_parent ON Projects(parent_project_id);
 CREATE INDEX IF NOT EXISTS idx_files_project_id ON Files(project_id);
 CREATE INDEX IF NOT EXISTS idx_files_box_no ON Files(box_no);
 CREATE INDEX IF NOT EXISTS idx_files_name ON Files(name);
+CREATE INDEX IF NOT EXISTS idx_files_deleted_at ON Files(deleted_at);
 CREATE INDEX IF NOT EXISTS idx_borrow_records_file_id ON BorrowRecords(file_id);
 CREATE INDEX IF NOT EXISTS idx_borrow_records_borrower ON BorrowRecords(borrower);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_borrow_one_active_record
-ON BorrowRecords(file_id)
-WHERE return_date IS NULL;
 """
 
 
@@ -72,34 +83,61 @@ SELECT
     f.id AS file_id,
     f.project_id,
     p.name AS project_name,
+    COALESCE(p.short_name, '') AS project_short_name,
+    parent.name AS parent_project_name,
     f.box_no,
     f.name AS file_name,
     f.type AS file_type,
     f.count_text,
     f.file_path,
-    br.id AS active_borrow_id,
-    br.borrower,
-    br.contact AS borrower_contact,
-    br.reason AS borrow_reason,
-    br.borrow_date,
+    f.original_count,
+    f.copy_count,
+    f.deleted_at,
+    COALESCE(active.borrowed_original, 0) AS borrowed_original,
+    COALESCE(active.borrowed_copy, 0) AS borrowed_copy,
+    f.original_count - COALESCE(active.borrowed_original, 0)
+        AS available_original,
+    f.copy_count - COALESCE(active.borrowed_copy, 0)
+        AS available_copy,
+    COALESCE(active.active_borrow_count, 0) AS active_borrow_count,
+    active.borrowers,
     CASE
-        WHEN br.id IS NULL THEN '在库'
-        ELSE '已借出'
+        WHEN COALESCE(active.active_borrow_count, 0) = 0 THEN '在库'
+        WHEN (
+            f.original_count - COALESCE(active.borrowed_original, 0) = 0
+            AND f.copy_count - COALESCE(active.borrowed_copy, 0) = 0
+        ) THEN '全部借出'
+        ELSE '部分借出'
     END AS computed_status,
     CASE
-        WHEN br.id IS NULL THEN '🟢 在库'
-        ELSE '🔴 已借出：' || br.borrower
+        WHEN COALESCE(active.active_borrow_count, 0) = 0 THEN '🟢 在库'
+        WHEN (
+            f.original_count - COALESCE(active.borrowed_original, 0) = 0
+            AND f.copy_count - COALESCE(active.borrowed_copy, 0) = 0
+        ) THEN '🔴 全部借出：' || active.borrowers
+        ELSE '🟠 部分借出：' || active.borrowers
     END AS status_display
 FROM Files AS f
 INNER JOIN Projects AS p ON p.id = f.project_id
-LEFT JOIN BorrowRecords AS br
-    ON br.file_id = f.id
-   AND br.return_date IS NULL
+LEFT JOIN Projects AS parent ON parent.id = p.parent_project_id
+LEFT JOIN (
+    SELECT
+        file_id,
+        SUM(CASE WHEN media_type = '原件' THEN quantity ELSE 0 END)
+            AS borrowed_original,
+        SUM(CASE WHEN media_type = '复印件' THEN quantity ELSE 0 END)
+            AS borrowed_copy,
+        COUNT(*) AS active_borrow_count,
+        GROUP_CONCAT(borrower, '、') AS borrowers
+    FROM BorrowRecords
+    WHERE return_date IS NULL
+    GROUP BY file_id
+) AS active ON active.file_id = f.id
 """
 
 
 class Database:
-    """管理 SQLite 连接、建表校验和基础联合查询。"""
+    """管理连接、事务、版本迁移和查询。"""
 
     def __init__(
         self,
@@ -112,11 +150,6 @@ class Database:
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
-        """提供自动提交/回滚/关闭的数据库连接。
-
-        每次连接均执行 ``PRAGMA foreign_keys = ON``。写操作发生锁竞争时，
-        SQLite 会在 busy timeout 内等待，而不是立即抛出 database is locked。
-        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(
             self.path,
@@ -124,7 +157,6 @@ class Database:
             isolation_level="DEFERRED",
         )
         conn.row_factory = sqlite3.Row
-
         try:
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute(f"PRAGMA busy_timeout = {int(self.busy_timeout_ms)}")
@@ -137,41 +169,91 @@ class Database:
             conn.close()
 
     def initialize(self) -> None:
-        """初始化数据库，并验证关键结构约束。"""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        existed = self.path.exists() and self.path.stat().st_size > 0
+        if existed:
+            with sqlite3.connect(self.path) as probe:
+                version = int(probe.execute("PRAGMA user_version").fetchone()[0])
+                has_legacy_tables = probe.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='Projects'"
+                ).fetchone()
+            if has_legacy_tables and version < SCHEMA_VERSION:
+                self._create_upgrade_backup()
+
         with self.connection() as conn:
-            # WAL 提升单机程序读写并发能力；NORMAL 在可靠性和性能间取平衡。
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("PRAGMA synchronous = NORMAL")
+            self._migrate(conn)
             conn.executescript(SCHEMA_SQL)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             self._validate_schema(conn)
 
-    def _validate_schema(self, conn: sqlite3.Connection) -> None:
-        """拒绝带硬编码状态列或缺少关键约束的数据库。"""
-        file_columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(Files)").fetchall()
+    def _create_upgrade_backup(self) -> Path:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        target = self.path.with_name(f"{self.path.stem}-升级前-{stamp}.db")
+        source = sqlite3.connect(self.path)
+        destination = sqlite3.connect(target)
+        try:
+            source.backup(destination)
+        finally:
+            destination.close()
+            source.close()
+        return target
+
+    @staticmethod
+    def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+        return {
+            str(row["name"])
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
         }
-        if "status" in {name.lower() for name in file_columns}:
-            raise RuntimeError(
-                "数据库结构不合法：Files 表禁止包含 status 字段，"
-                "状态必须由有效借阅记录动态计算。"
-            )
 
-        foreign_keys_enabled = conn.execute("PRAGMA foreign_keys").fetchone()[0]
-        if foreign_keys_enabled != 1:
-            raise RuntimeError("数据库连接未成功启用 PRAGMA foreign_keys = ON。")
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        projects_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='Projects'"
+        ).fetchone()
+        if not projects_exists:
+            conn.executescript(SCHEMA_SQL)
+            return
 
-        index_rows = conn.execute("PRAGMA index_list(BorrowRecords)").fetchall()
-        active_index = next(
-            (
-                row
-                for row in index_rows
-                if row["name"] == "idx_borrow_one_active_record"
-            ),
-            None,
-        )
-        if active_index is None or active_index["unique"] != 1 or active_index["partial"] != 1:
-            raise RuntimeError("缺少防止重复借阅的唯一部分索引。")
+        project_columns = self._column_names(conn, "Projects")
+        for definition in (
+            "parent_project_id INTEGER REFERENCES Projects(id) ON DELETE SET NULL",
+            "short_name TEXT",
+            "design_company TEXT",
+            "design_amount TEXT",
+            "completion_date TEXT",
+        ):
+            name = definition.split()[0]
+            if name not in project_columns:
+                conn.execute(f"ALTER TABLE Projects ADD COLUMN {definition}")
 
+        file_columns = self._column_names(conn, "Files")
+        for definition in (
+            "original_count INTEGER NOT NULL DEFAULT 1 CHECK (original_count >= 0)",
+            "copy_count INTEGER NOT NULL DEFAULT 0 CHECK (copy_count >= 0)",
+            "deleted_at DATETIME",
+        ):
+            name = definition.split()[0]
+            if name not in file_columns:
+                conn.execute(f"ALTER TABLE Files ADD COLUMN {definition}")
+
+        borrow_columns = self._column_names(conn, "BorrowRecords")
+        for definition in (
+            "media_type TEXT NOT NULL DEFAULT '原件'",
+            "quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0)",
+            "expected_return_date DATE",
+        ):
+            name = definition.split()[0]
+            if name not in borrow_columns:
+                conn.execute(f"ALTER TABLE BorrowRecords ADD COLUMN {definition}")
+
+        # V0.1 用唯一索引禁止并行借阅；V0.2 改为按库存数量控制。
+        conn.execute("DROP INDEX IF EXISTS idx_borrow_one_active_record")
+
+    def _validate_schema(self, conn: sqlite3.Connection) -> None:
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if version != SCHEMA_VERSION:
+            raise RuntimeError(f"数据库版本异常：期望 {SCHEMA_VERSION}，实际 {version}。")
         violations = conn.execute("PRAGMA foreign_key_check").fetchall()
         if violations:
             raise RuntimeError(f"数据库存在外键完整性错误：{violations!r}")
@@ -181,11 +263,6 @@ class Database:
         sql: str,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
     ) -> int:
-        """执行单条写语句并返回 lastrowid。
-
-        业务层可使用此方法完成简单写入；复杂事务应直接使用
-        ``with database.connection() as conn``，确保多条语句原子提交。
-        """
         with self.connection() as conn:
             cursor = conn.execute(sql, parameters)
             return int(cursor.lastrowid or 0)
@@ -195,10 +272,8 @@ class Database:
         sql: str,
         parameters: Sequence[Any] | Mapping[str, Any] = (),
     ) -> int:
-        """执行写语句并返回受影响行数。"""
         with self.connection() as conn:
-            cursor = conn.execute(sql, parameters)
-            return cursor.rowcount
+            return conn.execute(sql, parameters).rowcount
 
     def fetch_all(
         self,
@@ -219,32 +294,28 @@ class Database:
         return dict(row) if row is not None else None
 
     def list_projects(self) -> list[dict[str, Any]]:
-        """按创建顺序返回左侧列表所需的全部项目。"""
         return self.fetch_all(
             """
             SELECT
-                id,
-                name,
-                construction_company,
-                contract_amount,
-                supervision_company,
-                supervision_amount,
-                start_date,
-                contact_person,
-                contact_phone,
-                remarks,
-                created_at
-            FROM Projects
-            ORDER BY id ASC
+                p.*,
+                parent.name AS parent_project_name
+            FROM Projects AS p
+            LEFT JOIN Projects AS parent ON parent.id = p.parent_project_id
+            ORDER BY
+                CASE WHEN p.parent_project_id IS NULL THEN p.id ELSE p.parent_project_id END,
+                CASE WHEN p.parent_project_id IS NULL THEN 0 ELSE 1 END,
+                p.id
             """
         )
 
-    def list_files_with_status(self, project_id: int) -> list[dict[str, Any]]:
-        """查询指定项目档案，状态由有效借阅记录实时计算。"""
+    def list_files_with_status(
+        self, project_id: int, *, include_deleted: bool = False
+    ) -> list[dict[str, Any]]:
+        deleted_clause = "" if include_deleted else "AND f.deleted_at IS NULL"
         return self.fetch_all(
             FILE_STATUS_SELECT
-            + """
-            WHERE f.project_id = ?
+            + f"""
+            WHERE f.project_id = ? {deleted_clause}
             ORDER BY
                 CASE WHEN f.box_no IS NULL OR f.box_no = '' THEN 1 ELSE 0 END,
                 f.box_no COLLATE NOCASE,
@@ -254,44 +325,38 @@ class Database:
         )
 
     def get_file_with_status(self, file_id: int) -> dict[str, Any] | None:
-        """查询单条档案及其实时借阅状态。"""
-        return self.fetch_one(
-            FILE_STATUS_SELECT + " WHERE f.id = ?",
-            (file_id,),
-        )
+        return self.fetch_one(FILE_STATUS_SELECT + " WHERE f.id = ?", (file_id,))
 
     def search_files_global(self, keyword: str) -> list[dict[str, Any]]:
-        """跨项目搜索项目名、盒号、文件名和当前借用人。
-
-        借用人匹配仅针对尚未归还的借阅记录，与界面当前状态保持一致。
-        空关键词返回空列表，避免误加载全部档案。
-        """
         normalized = keyword.strip()
         if not normalized:
             return []
-
-        escaped = (
-            normalized.replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
-        )
+        escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         pattern = f"%{escaped}%"
         return self.fetch_all(
             FILE_STATUS_SELECT
             + """
-            WHERE
+            WHERE f.deleted_at IS NULL AND (
                 p.name LIKE ? ESCAPE '\\' COLLATE NOCASE
+                OR COALESCE(p.short_name, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+                OR COALESCE(parent.name, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
                 OR COALESCE(f.box_no, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
                 OR f.name LIKE ? ESCAPE '\\' COLLATE NOCASE
-                OR COALESCE(br.borrower, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+                OR EXISTS (
+                    SELECT 1
+                    FROM BorrowRecords AS search_br
+                    WHERE search_br.file_id = f.id
+                      AND search_br.return_date IS NULL
+                      AND search_br.borrower LIKE ? ESCAPE '\\' COLLATE NOCASE
+                )
+            )
             ORDER BY p.name COLLATE NOCASE, f.box_no COLLATE NOCASE, f.id
             """,
-            (pattern, pattern, pattern, pattern),
+            (pattern, pattern, pattern, pattern, pattern, pattern),
         )
 
 
 def init_database(database_path: str | Path) -> Database:
-    """初始化并返回数据库对象，便于入口或脚本调用。"""
     database = Database(database_path)
     database.initialize()
     return database

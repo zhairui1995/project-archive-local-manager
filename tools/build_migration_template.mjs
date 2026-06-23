@@ -11,14 +11,16 @@ const workbook = Workbook.create();
 const input = workbook.worksheets.add("档案导入");
 const guide = workbook.worksheets.add("填写说明");
 
-input.getRange("A1:E1").values = [[
+input.getRange("A1:G1").values = [[
   "盒号",
   "文件名称",
   "载体类型",
   "份数描述",
+  "原件库存",
+  "复印件库存",
   "电子文件路径",
 ]];
-input.getRange("A1:E101").format.borders = {
+input.getRange("A1:G101").format.borders = {
   top: { style: "thin", color: "#D8DEE9" },
   bottom: { style: "thin", color: "#D8DEE9" },
   left: { style: "thin", color: "#D8DEE9" },
@@ -26,13 +28,13 @@ input.getRange("A1:E101").format.borders = {
   insideHorizontal: { style: "hair", color: "#E5E9F0" },
   insideVertical: { style: "hair", color: "#E5E9F0" },
 };
-input.getRange("A1:E1").format = {
+input.getRange("A1:G1").format = {
   fill: "#1F4E78",
   font: { bold: true, color: "#FFFFFF", size: 11 },
   horizontalAlignment: "center",
   verticalAlignment: "center",
 };
-input.getRange("A2:E101").format = {
+input.getRange("A2:G101").format = {
   fill: "#FFFFFF",
   font: { color: "#263238", size: 10 },
   verticalAlignment: "center",
@@ -41,13 +43,21 @@ input.getRange("A1:A101").format.columnWidth = 14;
 input.getRange("B1:B101").format.columnWidth = 30;
 input.getRange("C1:C101").format.columnWidth = 16;
 input.getRange("D1:D101").format.columnWidth = 16;
-input.getRange("E1:E101").format.columnWidth = 52;
-input.getRange("A1:E1").format.rowHeight = 24;
+input.getRange("E1:F101").format.columnWidth = 14;
+input.getRange("G1:G101").format.columnWidth = 52;
+input.getRange("A1:G1").format.rowHeight = 24;
 input.freezePanes.freezeRows(1);
 input.getRange("C2:C101").dataValidation = {
   rule: {
     type: "list",
     formula1: '"原件,复印件,电子件,其他"',
+  },
+};
+input.getRange("E2:F101").dataValidation = {
+  rule: {
+    type: "whole",
+    operator: "greaterThanOrEqual",
+    formula1: 0,
   },
 };
 
@@ -60,13 +70,15 @@ guide.getRange("A1:B1").format = {
   rowHeight: 34,
 };
 
-guide.getRange("A3:B9").values = [
+guide.getRange("A3:B11").values = [
   ["项目", "说明"],
   ["导入范围", "一个 Excel 文件导入到当前选中的一个项目。"],
   ["文件名称", "必填；空白行不会成为有效档案。"],
   ["盒号", "可留空，例如 A-001。"],
   ["载体类型", "可从下拉列表选择，也可填写其他文字。"],
   ["份数描述", "允许填写 3份、2本 等文字。"],
+  ["原件库存", "非负整数；不填写时默认按 1 份原件导入。"],
+  ["复印件库存", "非负整数；不填写时默认按 0 份复印件导入。"],
   ["电子文件路径", "填写 Windows 绝对路径；系统只保存路径，不复制文件。"],
 ];
 guide.getRange("A3:B3").format = {
@@ -74,11 +86,11 @@ guide.getRange("A3:B3").format = {
   font: { bold: true, color: "#FFFFFF" },
   horizontalAlignment: "center",
 };
-guide.getRange("A4:A9").format = {
+guide.getRange("A4:A11").format = {
   fill: "#D9EAF7",
   font: { bold: true, color: "#1F2937" },
 };
-guide.getRange("A3:B9").format.borders = {
+guide.getRange("A3:B11").format.borders = {
   top: { style: "thin", color: "#B8C4CE" },
   bottom: { style: "thin", color: "#B8C4CE" },
   left: { style: "thin", color: "#B8C4CE" },
@@ -86,18 +98,18 @@ guide.getRange("A3:B9").format.borders = {
   insideHorizontal: { style: "thin", color: "#D8DEE9" },
   insideVertical: { style: "thin", color: "#D8DEE9" },
 };
-guide.getRange("A3:A9").format.columnWidth = 18;
-guide.getRange("B3:B9").format.columnWidth = 64;
-guide.getRange("B4:B9").format.wrapText = true;
-guide.getRange("A11:B11").values = [[
+guide.getRange("A3:A11").format.columnWidth = 18;
+guide.getRange("B3:B11").format.columnWidth = 64;
+guide.getRange("B4:B11").format.wrapText = true;
+guide.getRange("A13:B13").values = [[
   "重要提示",
   "不要修改“档案导入”工作表的表头，不要增加标题行或合并数据单元格；重复导入会产生重复档案。",
 ]];
-guide.getRange("A11:B11").format = {
+guide.getRange("A13:B13").format = {
   fill: "#FFF2CC",
   font: { bold: true, color: "#7F6000" },
   wrapText: true,
-  rowHeight: 38,
+  rowHeight: 68,
 };
 guide.showGridlines = false;
 
@@ -107,10 +119,10 @@ await exported.save(outputPath);
 
 const tableCheck = await workbook.inspect({
   kind: "table",
-  range: "档案导入!A1:E6",
+  range: "档案导入!A1:G6",
   include: "values,formulas",
   tableMaxRows: 6,
-  tableMaxCols: 5,
+  tableMaxCols: 7,
 });
 console.log(tableCheck.ndjson);
 
@@ -124,7 +136,7 @@ console.log(errors.ndjson);
 
 const inputPreview = await workbook.render({
   sheetName: "档案导入",
-  range: "A1:E12",
+  range: "A1:G12",
   scale: 1.5,
 });
 await fs.writeFile(
@@ -134,7 +146,7 @@ await fs.writeFile(
 
 const guidePreview = await workbook.render({
   sheetName: "填写说明",
-  range: "A1:B11",
+  range: "A1:B13",
   scale: 1.5,
 });
 await fs.writeFile(

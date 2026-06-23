@@ -25,3 +25,7 @@ def application_data_dir() -> Path:
 
 def database_path() -> Path:
     return application_data_dir() / "project_archives.db"
+
+
+def lock_config_path() -> Path:
+    return application_data_dir() / "app_lock.json"

@@ -21,7 +21,7 @@ python -m pytest -q
 .\build_windows.ps1
 ```
 
-成功后输出：
+V0.2 使用 GUI 模式构建，不显示控制台黑窗口。成功后输出：
 
 ```text
 installer_output\项目档案本地管理系统-Setup.exe

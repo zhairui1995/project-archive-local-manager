@@ -19,14 +19,14 @@ def test_main_window_smoke(tmp_path: Path) -> None:
     files.create_file({"project_id": project_id, "name": "界面测试文件"})
 
     window = MainWindow(database)
-    assert window.project_list.count() == 1
+    assert window.project_tree.topLevelItemCount() == 1
     assert window.table.rowCount() == 1
     assert window.search_timer.interval() == 300
     window.close()
     app.processEvents()
 
 
-def test_global_search_click_jumps_to_project_and_file(tmp_path: Path) -> None:
+def test_global_search_stays_visible_until_explicit_location(tmp_path: Path) -> None:
     app = QApplication.instance() or QApplication([])
     database = Database(tmp_path / "search-ui.db")
     database.initialize()
@@ -45,7 +45,10 @@ def test_global_search_click_jumps_to_project_and_file(tmp_path: Path) -> None:
     assert window.global_mode is True
     assert window.table.rowCount() == 1
 
-    window._global_result_activated(0, 0)
+    window.table.selectRow(0)
+    assert window.search_edit.text() == "TARGET"
+    assert window.global_mode is True
+    window._locate_selected_project()
     assert window.current_project_id == second_project
     assert window.search_edit.text() == ""
     assert window.table.currentRow() >= 0
