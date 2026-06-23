@@ -66,8 +66,11 @@ class BackupService:
                     raise ValueError("备份文件格式不受支持。")
                 archive.extract("project_archives.db", temp)
             restored = temp / "project_archives.db"
-            with sqlite3.connect(restored) as conn:
+            conn = sqlite3.connect(restored)
+            try:
                 integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            finally:
+                conn.close()
             if integrity != "ok":
                 raise ValueError("备份数据库完整性检查失败。")
             safety = self.database.path.with_name(
